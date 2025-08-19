@@ -1,0 +1,7 @@
+mysql-connector-python==8.0.33
+fastapi==0.68.0
+uvicorn==0.15.0
+python-jose==3.3.0
+passlib==1.7.4
+redis==4.5.4
+requests==2.31.0
