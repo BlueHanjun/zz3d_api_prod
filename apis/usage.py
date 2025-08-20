@@ -74,28 +74,12 @@ def get_usage_summary_from_db(user_id: str, period: str, date: str) -> List[dict
 from fastapi import Header, HTTPException
 
 # 导入JWT解码和用户查询函数
-from .user import decode_token, get_user_by_phone_number
+from .auth import get_current_user as auth_get_current_user
 
 
 # 依赖项：获取当前用户
 async def get_current_user(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="缺少授权令牌")
-    
-    try:
-        # 提取JWT令牌（去除"Bearer "前缀）
-        token = authorization.replace("Bearer ", "")
-        # 解码JWT令牌获取用户信息
-        token_data = decode_token(token)
-        # 根据手机号查询用户信息
-        user = get_user_by_phone_number(token_data.phone_number)
-        if user is None:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        return user
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="无效的令牌")
+    return await auth_get_current_user(authorization)
 
 
 @router.get("/summary", response_model=UsageSummaryResponse, summary="获取用量统计数据")
