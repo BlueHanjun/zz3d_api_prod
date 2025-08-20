@@ -17,10 +17,6 @@ class UserInfo(BaseModel):
     created_at: str
 
 
-class TokenData(BaseModel):
-    phone_number: str
-
-
 def get_user_by_phone_number(phone_number: str) -> Optional[dict]:
     """从数据库查询用户信息"""
     connection = create_connection()
@@ -44,24 +40,9 @@ def get_user_by_phone_number(phone_number: str) -> Optional[dict]:
         close_connection(connection)
 
 
-# 模拟JWT解码函数
-def decode_token(token: str) -> TokenData:
-    # 模拟解码JWT令牌获取用户信息
-    # 实际项目中应使用JWT库进行解码
-    if token.startswith("fake-jwt-token-for-"):
-        phone_number = token.replace("fake-jwt-token-for-", "")
-        return TokenData(phone_number=phone_number)
-    else:
-        raise HTTPException(status_code=401, detail="无效的令牌")
-
-
 # 依赖项：获取当前用户
-def get_current_user(token: str = Depends(lambda: "fake-token")):
-    token_data = decode_token(token)
-    user = get_user_by_phone_number(token_data.phone_number)
-    if user is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
-    return user
+# 导入JWT验证函数
+from .auth import get_current_user
 
 
 @router.get("/me", response_model=UserInfo, summary="获取当前登录用户的信息")

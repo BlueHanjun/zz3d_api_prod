@@ -119,29 +119,8 @@ def delete_api_key_from_db(key_id: str, user_id: str) -> bool:
 
 from fastapi import Header, HTTPException
 
-# 导入JWT解码和用户查询函数
-from .user import decode_token, get_user_by_phone_number
-
-
-# 依赖项：获取当前用户
-async def get_current_user(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="缺少授权令牌")
-    
-    try:
-        # 提取JWT令牌（去除"Bearer "前缀）
-        token = authorization.replace("Bearer ", "")
-        # 解码JWT令牌获取用户信息
-        token_data = decode_token(token)
-        # 根据手机号查询用户信息
-        user = get_user_by_phone_number(token_data.phone_number)
-        if user is None:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        return user
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="无效的令牌")
+# 导入JWT验证函数
+from .auth import get_current_user
 
 
 @router.get("/", response_model=List[ApiKeyInfo], summary="获取当前用户的所有API密钥")

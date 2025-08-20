@@ -1,10 +1,14 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 import random
 import string
 from datetime import datetime, timedelta
 from typing import Dict
 import uuid
+
+# JWT相关导入
+from jose import jwt
+import os
 
 # 导入数据库模块
 from db.database import create_connection, close_connection, execute_query, execute_update
@@ -17,6 +21,11 @@ from external.sms_client import SMSClient
 from external.real_account_info import REAL_ACCOUNT_ID, REAL_PASSWORD, REAL_SMS_ENCRYPT_KEY, REAL_PRODUCT_ID, REAL_EXTEND_NO
 
 router = APIRouter()
+
+# JWT配置
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 
 class SendCodeRequest(BaseModel):
@@ -118,18 +127,85 @@ async def login(request: LoginRequest):
     finally:
         close_connection(connection)
     
-    # 生成JWT令牌（简化实现，实际项目中应使用加密库生成）
-    token = f"fake-jwt-token-for-{request.phone_number}"
+    # 生成JWT令牌
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {
+        "sub": request.phone_number,
+        "exp": expire
+    }
+    token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     
     return LoginResponse(token=token)
 
 
+# JWT令牌验证依赖
+async def get_current_user(authorization: str = Header(None, alias="Authorization")):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供访问令牌")
+    
+    # 从Authorization头部提取Bearer令牌
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="无效的认证方案")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="无效的认证头部格式")
+    
+    # 检查令牌是否在黑名单中
+    if is_token_blacklisted(token):
+        raise HTTPException(status_code=401, detail="令牌已失效")
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        phone_number: str = payload.get("sub")
+        if phone_number is None:
+            raise HTTPException(status_code=401, detail="令牌无效")
+    except jwt.JWTError:
+        raise HTTPException(status_code=401, detail="令牌无效")
+    
+    # 查询用户信息
+    connection = create_connection()
+    if not connection:
+        raise HTTPException(status_code=500, detail="数据库连接失败")
+    
+    try:
+        query = "SELECT id, phone_number, real_name, id_number, balance, created_at FROM users WHERE phone_number = %s"
+        result = execute_query(connection, query, (phone_number,))
+        
+        if not result:
+            raise HTTPException(status_code=401, detail="用户不存在")
+        
+        user_info = {
+            "id": result[0]["id"],
+            "phone_number": result[0]["phone_number"],
+            "real_name": result[0]["real_name"],
+            "id_number": result[0]["id_number"],
+            "balance": float(result[0]["balance"]),
+            "created_at": result[0]["created_at"].isoformat()
+        }
+    finally:
+        close_connection(connection)
+    
+    return user_info
+
+
 @router.post("/logout", summary="用户登出")
-async def logout(token: str = Depends(lambda: "fake-token")):
+async def logout(authorization: str = Header(None, alias="Authorization")):
     """
     用户登出
     - 逻辑：使当前用户的令牌失效（例如通过黑名单机制）。
     """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="未提供访问令牌")
+    
+    # 从Authorization头部提取Bearer令牌
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="无效的认证方案")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="无效的认证头部格式")
+    
     # 将令牌加入黑名单（存储到Redis中）
     add_token_to_blacklist(token, 30)  # 30分钟过期
     
