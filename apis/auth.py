@@ -25,7 +25,7 @@ router = APIRouter()
 # JWT配置
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 一个月
 
 
 class SendCodeRequest(BaseModel):

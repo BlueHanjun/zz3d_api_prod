@@ -32,6 +32,30 @@ class TransactionInfo(BaseModel):
     created_at: str
     completed_at: Optional[str] = None
 
+    @staticmethod
+    def translate_status(status: str) -> str:
+        """将英文状态转换为中文状态"""
+        status_map = {
+            "pending": "待支付",
+            "completed": "已完成",
+            "failed": "已失败",
+            "cancelled": "已取消"
+        }
+        return status_map.get(status, status)
+
+    class Config:
+        # 用于在序列化时修改status字段的值
+        @staticmethod
+        def json_schema_extra(schema, model):
+            pass
+
+    def dict(self, *args, **kwargs):
+        # 调用父类的dict方法获取原始字典
+        data = super().dict(*args, **kwargs)
+        # 将status字段转换为中文
+        data["status"] = self.translate_status(data["status"])
+        return data
+
 
 class WebhookRequest(BaseModel):
     transaction_id: str
@@ -102,20 +126,31 @@ def get_transactions_by_user_id(user_id: str) -> List[dict]:
         close_connection(connection)
 
 
-def update_transaction_status(transaction_id: str, status: str, external_transaction_id: str) -> bool:
+def update_transaction_status(transaction_id: str, status: str, external_transaction_id: str = None) -> bool:
     """更新交易状态"""
     connection = create_connection()
     if not connection:
         return False
     
     try:
-        query = """
-            UPDATE transactions 
-            SET status = %s, external_transaction_id = %s, completed_at = %s 
-            WHERE id = %s
-        """
-        completed_at = datetime.now().isoformat() if status == "completed" else None
-        success = execute_update(connection, query, (status, external_transaction_id, completed_at, transaction_id))
+        # 如果提供了外部交易号，则使用外部交易号更新交易状态
+        if external_transaction_id:
+            query = """
+                UPDATE transactions 
+                SET status = %s, external_transaction_id = %s, completed_at = %s 
+                WHERE external_transaction_id = %s
+            """
+            completed_at = datetime.now().isoformat() if status == "completed" else None
+            success = execute_update(connection, query, (status, external_transaction_id, completed_at, external_transaction_id))
+        else:
+            # 否则使用交易ID更新交易状态
+            query = """
+                UPDATE transactions 
+                SET status = %s, completed_at = %s 
+                WHERE id = %s
+            """
+            completed_at = datetime.now().isoformat() if status == "completed" else None
+            success = execute_update(connection, query, (status, completed_at, transaction_id))
         return success
     finally:
         close_connection(connection)
@@ -152,23 +187,80 @@ def update_user_balance(user_id: str, amount: float) -> bool:
         close_connection(connection)
 
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 from datetime import datetime
 
 # 导入JWT验证函数
 from .auth import get_current_user
 
+# 导入微信支付SDK
+from wechatpayv3 import WeChatPay, WeChatPayType
+import os
 
-# 模拟支付网关服务
+# 导入微信支付配置
+from config.wxpay_config import MCHID, PRIVATE_KEY_PATH, CERT_SERIAL_NO, APIV3_KEY, APPID, NOTIFY_URL, CERT_DIR
+
+# 初始化微信支付客户端
+with open(PRIVATE_KEY_PATH) as f:
+    PRIVATE_KEY = f.read()
+
+wxpay = WeChatPay(
+    wechatpay_type=WeChatPayType.NATIVE,
+    mchid=MCHID,
+    private_key=PRIVATE_KEY,
+    cert_serial_no=CERT_SERIAL_NO,
+    apiv3_key=APIV3_KEY,
+    appid=APPID,
+    notify_url=NOTIFY_URL,
+    cert_dir=CERT_DIR
+)
+
 class PaymentGateway:
     @staticmethod
     def create_payment(amount: float, payment_method: str) -> dict:
-        # 模拟调用支付网关创建支付
-        # 实际项目中应调用微信支付或支付宝API
-        return {
-            "external_transaction_id": f"ext-{uuid.uuid4().hex[:8]}",
-            "payment_url": f"https://payment.example.com/pay/{uuid.uuid4()}"
-        }
+        # 调用微信支付Native支付接口
+        if payment_method == "wechat_pay":
+            # 生成商户订单号
+            out_trade_no = f"{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6]}"
+            
+            # 构造支付请求参数
+            payment_data = {
+                "description": "商品充值",
+                "out_trade_no": out_trade_no,
+                "amount": {
+                    "total": int(amount * 100),  # 转换为分
+                    "currency": "CNY"
+                },
+                "notify_url": NOTIFY_URL
+            }
+            
+            # 调用微信支付统一下单API
+            code, result = wxpay.pay(
+                description=payment_data["description"],
+                out_trade_no=payment_data["out_trade_no"],
+                amount=payment_data["amount"],
+                notify_url=payment_data["notify_url"]
+            )
+            
+            # 检查返回状态码
+            if code in [200, 201]:  # 成功状态码
+                # 解析返回结果，提取支付链接
+                import json
+                result_data = json.loads(result)
+                # 返回支付链接
+                return {
+                    "external_transaction_id": out_trade_no,
+                    "payment_url": result_data["code_url"]
+                }
+            else:
+                # 处理错误情况
+                raise Exception(f"微信支付接口调用失败，状态码: {code}，错误信息: {result}")
+        else:
+            # 其他支付方式保持模拟实现
+            return {
+                "external_transaction_id": f"ext-{uuid.uuid4().hex[:8]}",
+                "payment_url": f"https://payment.example.com/pay/{uuid.uuid4()}"
+            }
 
 
 @router.post("/recharge", response_model=RechargeResponse, summary="创建一个充值订单")
@@ -187,6 +279,15 @@ async def recharge(request: RechargeRequest, current_user: dict = Depends(get_cu
     
     # 更新交易记录的外部交易号
     transaction["external_transaction_id"] = payment_info["external_transaction_id"]
+    
+    # 将外部交易号更新到数据库
+    connection = create_connection()
+    if connection:
+        try:
+            update_query = "UPDATE transactions SET external_transaction_id = %s WHERE id = %s"
+            execute_update(connection, update_query, (payment_info["external_transaction_id"], transaction["id"]))
+        finally:
+            close_connection(connection)
     
     return RechargeResponse(
         id=transaction["id"],
@@ -208,46 +309,93 @@ async def billing_history(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/webhook", summary="接收支付网关的回调")
-async def payment_webhook(request: WebhookRequest):
+async def payment_webhook(request: Request):
     """
     接收支付网关的回调
     - 逻辑：这是由支付服务商（微信/支付宝）调用的接口，用于通知后端支付已成功。
       后端需要验证回调的合法性，然后更新对应交易的状态为 completed，并增加用户 users 表中的 balance。
     """
-    # 验证回调的合法性（简化实现，实际应验证签名）
-    # ...
+    # 验证微信支付回调的合法性
+    try:
+        result = wxpay.callback(request.headers, await request.body())
+        
+        if result and result["event_type"] == "TRANSACTION.SUCCESS":
+            # 解析回调数据
+            resource = result["resource"]
+            transaction_id = resource["transaction_id"]
+            out_trade_no = resource["out_trade_no"]
+            trade_state = resource["trade_state"]
+            
+            # 如果支付成功，更新用户余额
+            if trade_state == "SUCCESS":
+                # 获取交易信息
+                connection = create_connection()
+                if connection:
+                    try:
+                        # 先检查是否存在状态为'pending'的交易记录
+                        check_query = "SELECT user_id, amount FROM transactions WHERE external_transaction_id = %s AND status = 'pending'"
+                        result = execute_query(connection, check_query, (out_trade_no,))
+                        if result:
+                            transaction = result[0]
+                            # 更新交易状态
+                            success = update_transaction_status(None, "completed", out_trade_no)
+                            if not success:
+                                raise HTTPException(status_code=404, detail="交易记录不存在")
+                            
+                            # 更新用户余额
+                            update_user_balance(transaction["user_id"], transaction["amount"])
+                        else:
+                            raise HTTPException(status_code=404, detail="有效的待处理交易记录不存在")
+                    finally:
+                        close_connection(connection)
+                else:
+                    raise HTTPException(status_code=500, detail="数据库连接失败")
+        
+        return {"code": "SUCCESS", "message": "成功"}
+    except Exception as e:
+        # 记录错误日志
+        print(f"处理回调时出错: {e}")
+        # 重新抛出异常
+        raise e
+
+@router.post("/test-webhook", summary="测试用的回调端点")
+async def test_payment_webhook(request: Request):
+    """
+    测试用的回调端点，用于模拟支付成功的情况
+    """
+    # 解析回调数据
+    data = await request.json()
+    transaction_id = data.get("transaction_id")
+    out_trade_no = data.get("out_trade_no")
+    trade_state = data.get("trade_state", "SUCCESS")
     
     # 如果支付成功，更新用户余额
-    if request.status == "completed":
+    if trade_state == "SUCCESS":
         # 获取交易信息
         connection = create_connection()
         if connection:
             try:
                 # 先检查是否存在状态为'pending'的交易记录
-                check_query = "SELECT user_id, amount FROM transactions WHERE id = %s AND status = 'pending'"
-                result = execute_query(connection, check_query, (request.transaction_id,))
+                check_query = "SELECT user_id, amount FROM transactions WHERE external_transaction_id = %s AND status = 'pending'"
+                result = execute_query(connection, check_query, (out_trade_no,))
                 if result:
                     transaction = result[0]
                     # 更新交易状态
-                    success = update_transaction_status(request.transaction_id, request.status, request.external_transaction_id)
+                    success = update_transaction_status(None, "completed", out_trade_no)
                     if not success:
                         raise HTTPException(status_code=404, detail="交易记录不存在")
                     
                     # 更新用户余额
                     update_user_balance(transaction["user_id"], transaction["amount"])
+                    return {"code": "SUCCESS", "message": "用户余额已更新"}
                 else:
                     raise HTTPException(status_code=404, detail="有效的待处理交易记录不存在")
             finally:
                 close_connection(connection)
         else:
             raise HTTPException(status_code=500, detail="数据库连接失败")
-    else:
-        # 对于非completed状态，只更新交易状态
-        success = update_transaction_status(request.transaction_id, request.status, request.external_transaction_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="交易记录不存在")
     
-    return {"message": "回调处理成功"}
+    return {"code": "SUCCESS", "message": "成功"}
 
 
 @router.get("/balance", summary="获取用户余额")

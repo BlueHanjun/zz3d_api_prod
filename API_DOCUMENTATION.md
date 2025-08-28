@@ -159,7 +159,7 @@
 ```json
 {
   "amount": 100.00,       // 充值金额
-  "payment_method": "wechat_pay"  // 支付方式（wechat_pay 或 alipay）
+  "payment_method": "wechat_pay"  // 支付方式（目前仅支持 wechat_pay）
 }
 ```
 
@@ -170,7 +170,7 @@
   "id": "trans-123",
   "amount": 100.00,
   "payment_method": "wechat_pay",
-  "payment_url": "https://payment.example.com/pay/xxx",  // 支付链接
+  "payment_url": "weixin://wxpay/bizpayurl?pr=xxxxxx",  // 微信支付链接
   "created_at": "2023-01-01T00:00:00"
 }
 ```
@@ -200,22 +200,15 @@
 
 - **接口地址**: `/billing/webhook`
 - **请求方法**: `POST`
-- **说明**: 此接口由支付服务商调用，用于通知支付结果
-- **请求参数**:
-
-```json
-{
-  "transaction_id": "trans-123",        // 交易ID
-  "status": "completed",               // 支付状态
-  "external_transaction_id": "ext-abc12345"  // 外部交易号
-}
-```
+- **说明**: 此接口由微信支付服务商调用，用于通知支付结果
+- **注意**: 此接口不接收JSON参数，而是接收微信支付服务器发送的加密数据
 
 - **成功响应**:
 
 ```json
 {
-  "message": "回调处理成功"
+  "code": "SUCCESS",
+  "message": "成功"
 }
 ```
 
